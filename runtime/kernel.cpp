@@ -167,6 +167,9 @@ static void timeout_thread() {
 // and no guest code executing: from the running thread at a backward branch (rt_preempt, every
 // kDetBranchesPerStep), or from a thread that blocks with no other ready (the clock jumps to the next event).
 constexpr u64 kDetNsPerBranch = 2;       // virtual time a backward branch of guest code takes
+// and an SVC (a 3DS kernel call takes about that long): a thread polling the clock with SVCs between backward
+// branches sees it go on (Star Fox 64 3D's fiber scheduler waits for a time with GetSystemTick and a mutex)
+constexpr u64 kDetNsPerSvc = 1000;
 constexpr u32 kDetBranchesPerStep = 1024;
 struct DetPeriodic {
     u64 next, period;
@@ -732,7 +735,7 @@ static void svc_locked(CPU *c, u32 imm, Lock &lk) {
     case 0x02: c->r[0] = svc_query_memory(c); break;
     case 0x03:
         LOG("[svc] ExitProcess\n");
-        _exit(0);
+        rt_exit(0);
     case 0x08: {  // CreateThread(prio=r0, entry=r1, arg=r2, stack=r3, core=r4)
         s32 prio = (s32)c->r[0];
         auto nt = create_thread(c->r[1], c->r[2], c->r[3], prio, true);
@@ -1129,6 +1132,10 @@ void svc_dispatch(CPU *c, u32 imm) {
         return;
     }
     Lock lk(kmutex);
+    if (deterministic()) {
+        vclock += kDetNsPerSvc;
+        while (det_run_next(vclock, lk)) {}
+    }
     flush_deferred();
     if (svclog >= 0 && (svclog == 0 || current_thread()->id == (u32)svclog))
         LOG("[svc %u] %02x lr=%08x r0=%08x r1=%08x r2=%08x r3=%08x\n", current_thread()->id, imm, c->r[14], c->r[0],
